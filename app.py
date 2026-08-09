@@ -1,5 +1,8 @@
-import streamlit as st
+import sys
 import os
+sys.path.insert(0, os.path.dirname(__file__))
+
+import streamlit as st
 from agent import run_agent
 
 st.set_page_config(
@@ -16,6 +19,12 @@ st.markdown(
 )
 st.divider()
 
+# Load API keys from Streamlit secrets
+if "GOOGLE_API_KEY" in st.secrets:
+    os.environ["GOOGLE_API_KEY"] = st.secrets["GOOGLE_API_KEY"]
+if "TAVILY_API_KEY" in st.secrets:
+    os.environ["TAVILY_API_KEY"] = st.secrets["TAVILY_API_KEY"]
+
 # Check API keys
 missing = []
 if not os.environ.get("GOOGLE_API_KEY"):
@@ -26,7 +35,6 @@ if missing:
     st.error(f"⚠️ Missing API keys: {', '.join(missing)}. Add them in Streamlit Cloud → Settings → Secrets.")
     st.stop()
 
-# Sidebar
 with st.sidebar:
     st.header("About")
     st.markdown("""
@@ -54,7 +62,6 @@ with st.sidebar:
     st.markdown("---")
     st.caption("Built by [B S Rikeesh](https://linkedin.com/in/bsrikeesh)")
 
-# Query input
 query = st.text_input(
     "Enter your research query",
     placeholder="e.g. Latest advances in GNN-based channel decoding for 5G NR",
@@ -78,12 +85,10 @@ if run_btn and query:
         try:
             result = run_agent(query)
 
-            # Show steps
             with steps_placeholder.container():
                 for step in result["steps_taken"]:
                     st.markdown(step)
 
-            # Show report
             with report_placeholder.container():
                 if result["report"]:
                     st.markdown(result["report"])
@@ -95,7 +100,6 @@ if run_btn and query:
                         mime="text/markdown"
                     )
 
-            # Show sources
             st.divider()
             st.subheader("🔗 Sources Retrieved")
             for i, src in enumerate(result["extracted_content"], 1):
