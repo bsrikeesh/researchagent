@@ -11,19 +11,15 @@ def get_llm():
         max_output_tokens=2048,
     )
 
-
 def plan_node(state: AgentState) -> AgentState:
-    """Break the user query into a research plan."""
     llm = get_llm()
     prompt = f"""You are a research planner. Break this query into 3-4 specific search sub-tasks.
 Return ONLY a numbered list, one sub-task per line, no extra text.
 
 Query: {state['query']}"""
-
     response = llm.invoke([HumanMessage(content=prompt)])
     lines = [l.strip() for l in response.content.strip().splitlines() if l.strip()]
     plan = [l.lstrip("0123456789.-) ") for l in lines if l]
-
     return {
         **state,
         "plan": plan,
@@ -32,38 +28,29 @@ Query: {state['query']}"""
         ]
     }
 
-
 def search_node(state: AgentState) -> AgentState:
-    """Run web searches for each planned sub-task."""
     all_results = []
     steps = state.get("steps_taken", [])
-
     for task in state["plan"]:
         results = web_search(task, max_results=3)
         all_results.extend(results)
         steps = steps + [f"🔍 **Searched:** {task} → {len(results)} results"]
-
-    # Deduplicate by URL
     seen = set()
     unique = []
     for r in all_results:
         if r["url"] not in seen:
             seen.add(r["url"])
             unique.append(r)
-
     return {
         **state,
         "search_results": unique,
         "steps_taken": steps + [f"✅ **Search complete** — {len(unique)} unique sources found"]
     }
 
-
 def read_node(state: AgentState) -> AgentState:
-    """Read and extract content from each search result URL."""
     extracted = []
     steps = state.get("steps_taken", [])
-
-    for result in state["search_results"][:6]:  # Limit to top 6
+    for result in state["search_results"][:6]:
         content = read_url(result["url"])
         extracted.append({
             "title":   result["title"],
@@ -72,22 +59,17 @@ def read_node(state: AgentState) -> AgentState:
             "content": content
         })
         steps = steps + [f"📄 **Read:** {result['title'][:60]}..."]
-
     return {
         **state,
         "extracted_content": extracted,
         "steps_taken": steps + [f"✅ **Reading complete** — {len(extracted)} sources extracted"]
     }
 
-
 def synthesize_node(state: AgentState) -> AgentState:
-    """Synthesize all extracted content into key findings."""
     llm = get_llm()
-
     sources_text = ""
     for i, src in enumerate(state["extracted_content"], 1):
         sources_text += f"\n\nSource {i}: {src['title']}\nURL: {src['url']}\n{src['content'][:1000]}"
-
     prompt = f"""You are a research analyst. Synthesize the following sources into key findings.
 
 Original Query: {state['query']}
@@ -101,20 +83,15 @@ Produce:
 3. KEY PAPERS/SOURCES (the most relevant ones with URLs)
 
 Be precise and technical. Do not hallucinate."""
-
     response = llm.invoke([HumanMessage(content=prompt)])
-
     return {
         **state,
         "findings": response.content,
         "steps_taken": state.get("steps_taken", []) + ["🧠 **Synthesis complete** — key findings identified"]
     }
 
-
 def write_node(state: AgentState) -> AgentState:
-    """Write the final structured research report."""
     llm = get_llm()
-
     prompt = f"""You are a technical research writer. Write a structured research report.
 
 Query: {state['query']}
@@ -147,9 +124,7 @@ Write a professional report with these exact sections:
 (List all sources used with URLs)
 
 Be technical, precise, and cite sources throughout."""
-
     response = llm.invoke([HumanMessage(content=prompt)])
-
     return {
         **state,
         "report": response.content,
