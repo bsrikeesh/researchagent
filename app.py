@@ -58,7 +58,7 @@ def read_url(url: str, max_chars: int = 3000) -> str:
 def get_llm():
     from langchain_google_genai import ChatGoogleGenerativeAI
     return ChatGoogleGenerativeAI(
-        model="gemini-1.5-flash",
+        model="gemini-3.6-flash",
         google_api_key=os.environ.get("GOOGLE_API_KEY"),
         max_output_tokens=2048,
     )
