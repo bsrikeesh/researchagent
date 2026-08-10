@@ -145,12 +145,12 @@ researchagent/
 
 ## 👤 Author
 
-**Your Name**
-Your Title · Your University/Company  
-AI/ML Engineer · GenAI Developer
+**B S Rikeesh**
+ECE Graduate · GITAM University, Bengaluru
+AI/ML Engineer · GenAI Developer · ServiceNow CSA
 
-[![LinkedIn](https://img.shields.io/badge/LinkedIn-yourprofile-blue?style=flat&logo=linkedin)](https://linkedin.com/in/yourprofile)
-[![GitHub](https://img.shields.io/badge/GitHub-yourusername-black?style=flat&logo=github)](https://github.com/yourusername)
+[![LinkedIn](https://img.shields.io/badge/LinkedIn-bsrikeesh-blue?style=flat&logo=linkedin)](https://linkedin.com/in/bsrikeesh)
+[![GitHub](https://img.shields.io/badge/GitHub-bsrikeesh-black?style=flat&logo=github)](https://github.com/bsrikeesh)
 
 ---
 
