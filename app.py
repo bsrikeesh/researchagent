@@ -1,7 +1,7 @@
 """
 ResearchAgent — Autonomous 5G Research Assistant
 Single-file Streamlit app with LangGraph agent.
-Uses Gemini 3.6 Flash as primary LLM with multi-model fallback.
+Uses Gemini 3.6 Flash + robust response cleaning.
 """
 
 import streamlit as st
@@ -16,9 +16,9 @@ from typing import TypedDict, List, Annotated
 # ---------------------------------------------------------------------------
 
 MODEL_PRIORITY = [
-    "gemini-3.6-flash",         # ← primary: latest workhorse model (July 2026)
-    "gemini-3.5-flash-lite",    # ← fallback 1: fastest, most cost-effective
-    "gemini-3.5-flash",         # ← fallback 2: previous generation
+    "gemini-3.6-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-3.5-flash",
 ]
 
 def _get_llm(model_name: str = None):
@@ -36,25 +36,70 @@ def _get_tavily_client():
     return TavilyClient(api_key=st.secrets["TAVILY_API_KEY"])
 
 # ---------------------------------------------------------------------------
-# Safe content extractor + retry wrapper
+# Safe content extractor — handles ALL response formats
 # ---------------------------------------------------------------------------
 
 def _safe_content(response) -> str:
+    """Extract clean string content from LLM response."""
     if hasattr(response, "content"):
         content = response.content
     else:
         content = str(response)
+
+    # If it's already a string, try to parse as dict literal first
+    if isinstance(content, str):
+        text = _extract_text_from_dict_string(content)
+        if text is not None:
+            return text
+
+    # Handle actual dict object
+    if isinstance(content, dict):
+        if "text" in content:
+            return str(content["text"])
+        return str(content)
+
+    # Handle list of parts
     if isinstance(content, list):
         parts = []
         for item in content:
             if isinstance(item, str):
                 parts.append(item)
+            elif isinstance(item, dict) and "text" in item:
+                parts.append(str(item["text"]))
             elif hasattr(item, "text"):
                 parts.append(item.text)
             else:
                 parts.append(str(item))
         return "\n".join(parts)
+
     return str(content)
+
+def _extract_text_from_dict_string(s: str) -> str | None:
+    """If string is a Python dict with 'type':'text' and 'text', extract the text value."""
+    s = s.strip()
+    if not (s.startswith("{") and s.endswith("}")):
+        return None
+    # Try to find 'text': '...' or "text": "..."
+    # Use a non-greedy match for the value
+    match = re.search(r"['\"]text['\"]\s*:\s*['\"](.*?)['\"]\s*,?\s*(?:['\"]extras['\"]|\})", s, re.DOTALL)
+    if match:
+        return match.group(1)
+    # Fallback: try without the trailing constraint
+    match = re.search(r"['\"]text['\"]\s*:\s*['\"](.*?)['\"]", s, re.DOTALL)
+    if match:
+        return match.group(1)
+    return None
+
+def _strip_signature(text: str) -> str:
+    """Remove any trailing signature/extras metadata blocks."""
+    # Find position of 'extras' or "extras" key and cut from there
+    for pattern in ["'extras'", '"extras"']:
+        idx = text.rfind(pattern)
+        if idx != -1:
+            # Cut at extras, also remove trailing comma before it
+            text = text[:idx].rstrip().rstrip(',').rstrip()
+            break
+    return text
 
 def _invoke_with_fallback(prompt: str, retries: int = 2) -> str:
     """Try models in priority order with retry logic."""
@@ -64,14 +109,16 @@ def _invoke_with_fallback(prompt: str, retries: int = 2) -> str:
             try:
                 llm = _get_llm(model_name)
                 response = llm.invoke(prompt)
-                time.sleep(1)  # Rate limit protection
-                return _safe_content(response)
+                time.sleep(1)
+                raw = _safe_content(response)
+                cleaned = _strip_signature(raw)
+                return cleaned
             except Exception as e:
                 last_error = e
                 error_str = str(e).lower()
                 if "resource_exhausted" in error_str or "429" in error_str:
                     st.warning(f"⚠️ {model_name} quota exceeded (attempt {attempt+1}), trying fallback...")
-                    time.sleep(2 ** attempt)  # Exponential backoff
+                    time.sleep(2 ** attempt)
                     continue
                 else:
                     raise
