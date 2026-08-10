@@ -1,44 +1,49 @@
 """
 ResearchAgent — Autonomous 5G Research Assistant
 Single-file Streamlit app with LangGraph agent.
-All code inline to avoid namespace collisions.
+Uses Gemini 3.6 Flash as primary LLM with multi-model fallback.
 """
 
 import streamlit as st
 import os
 import json
 import re
+import time
 from typing import TypedDict, List, Annotated
-from dataclasses import dataclass
 
 # ---------------------------------------------------------------------------
-# External imports (loaded inside functions where needed to avoid init issues)
+# Multi-model fallback LLM loader
 # ---------------------------------------------------------------------------
+
+MODEL_PRIORITY = [
+    "gemini-3.6-flash",         # ← primary: latest workhorse model (July 2026)
+    "gemini-3.5-flash-lite",    # ← fallback 1: fastest, most cost-effective
+    "gemini-3.5-flash",         # ← fallback 2: previous generation
+]
+
+def _get_llm(model_name: str = None):
+    from langchain_google_genai import ChatGoogleGenerativeAI
+    if model_name is None:
+        model_name = MODEL_PRIORITY[0]
+    return ChatGoogleGenerativeAI(
+        model=model_name,
+        temperature=0.3,
+        google_api_key=st.secrets["GOOGLE_API_KEY"],
+    )
 
 def _get_tavily_client():
     from tavily import TavilyClient
     return TavilyClient(api_key=st.secrets["TAVILY_API_KEY"])
 
-def _get_llm():
-    from langchain_google_genai import ChatGoogleGenerativeAI
-    return ChatGoogleGenerativeAI(
-        model="gemini-2.0-flash",
-        temperature=0.3,
-        google_api_key=st.secrets["GOOGLE_API_KEY"],
-    )
-
 # ---------------------------------------------------------------------------
-# Helper: safely extract string content from LLM response
+# Safe content extractor + retry wrapper
 # ---------------------------------------------------------------------------
 
 def _safe_content(response) -> str:
-    """Extract string content from LLM response, handling list responses."""
     if hasattr(response, "content"):
         content = response.content
     else:
         content = str(response)
-    
-    # Gemini sometimes returns a list of content parts
     if isinstance(content, list):
         parts = []
         for item in content:
@@ -49,8 +54,28 @@ def _safe_content(response) -> str:
             else:
                 parts.append(str(item))
         return "\n".join(parts)
-    
     return str(content)
+
+def _invoke_with_fallback(prompt: str, retries: int = 2) -> str:
+    """Try models in priority order with retry logic."""
+    last_error = None
+    for model_name in MODEL_PRIORITY:
+        for attempt in range(retries + 1):
+            try:
+                llm = _get_llm(model_name)
+                response = llm.invoke(prompt)
+                time.sleep(1)  # Rate limit protection
+                return _safe_content(response)
+            except Exception as e:
+                last_error = e
+                error_str = str(e).lower()
+                if "resource_exhausted" in error_str or "429" in error_str:
+                    st.warning(f"⚠️ {model_name} quota exceeded (attempt {attempt+1}), trying fallback...")
+                    time.sleep(2 ** attempt)  # Exponential backoff
+                    continue
+                else:
+                    raise
+    raise RuntimeError(f"All models exhausted. Last error: {last_error}")
 
 # ---------------------------------------------------------------------------
 # State
@@ -71,7 +96,6 @@ class AgentState(TypedDict):
 # ---------------------------------------------------------------------------
 
 def web_search(query: str, max_results: int = 5) -> List[dict]:
-    """Search the web using Tavily."""
     client = _get_tavily_client()
     response = client.search(query=query, max_results=max_results, search_depth="advanced")
     results = []
@@ -85,7 +109,6 @@ def web_search(query: str, max_results: int = 5) -> List[dict]:
     return results
 
 def fetch_page_text(url: str) -> str:
-    """Fetch and extract clean text from a URL."""
     import requests
     from bs4 import BeautifulSoup
     try:
@@ -93,7 +116,6 @@ def fetch_page_text(url: str) -> str:
         resp = requests.get(url, headers=headers, timeout=15)
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "html.parser")
-        # Remove script/style
         for tag in soup(["script", "style", "nav", "footer", "header"]):
             tag.decompose()
         text = soup.get_text(separator="\n")
@@ -107,15 +129,12 @@ def fetch_page_text(url: str) -> str:
 # ---------------------------------------------------------------------------
 
 def plan_node(state: AgentState) -> AgentState:
-    llm = _get_llm()
     prompt = f"""You are a research planner. Given the user query, break it into 3-5 concrete sub-tasks for a research agent.
 Return ONLY a JSON array of strings. No markdown, no explanation.
 
 Query: {state['query']}
 """
-    response = llm.invoke(prompt)
-    text = _safe_content(response)
-    # Extract JSON array
+    text = _invoke_with_fallback(prompt)
     match = re.search(r"\[.*?\]", text, re.DOTALL)
     if match:
         try:
@@ -126,10 +145,7 @@ Query: {state['query']}
             plan = [state["query"]]
     else:
         plan = [state["query"]]
-    
-    # Ensure all items are strings
     plan = [str(p).strip() for p in plan if p]
-    
     state["plan"] = plan
     state["current_step"] = "plan"
     state["logs"].append(f"📋 Planned {len(plan)} sub-tasks: {plan}")
@@ -155,7 +171,6 @@ def read_node(state: AgentState) -> AgentState:
     for r in state["search_results"]:
         url = str(r["url"])
         text = fetch_page_text(url)
-        # Truncate to avoid token explosion
         truncated = str(text)[:4000]
         title = str(r.get("title", "Untitled"))
         findings.append(f"SOURCE: {title}\nURL: {url}\nCONTENT: {truncated}\n---")
@@ -164,7 +179,6 @@ def read_node(state: AgentState) -> AgentState:
     return state
 
 def synthesize_node(state: AgentState) -> AgentState:
-    llm = _get_llm()
     findings_text = "\n\n".join(str(f) for f in state["extracted_findings"])
     prompt = f"""You are a technical research synthesizer. Based on the findings below, produce a concise synthesis that:
 1. Summarizes key advances
@@ -175,21 +189,19 @@ Findings:
 {findings_text}
 
 Synthesis:"""
-    response = llm.invoke(prompt)
-    synthesis = _safe_content(response)
+    synthesis = _invoke_with_fallback(prompt)
     state["synthesis"] = synthesis
     state["current_step"] = "synthesize"
     state["logs"].append("🧠 Synthesized findings")
     return state
 
 def write_node(state: AgentState) -> AgentState:
-    llm = _get_llm()
     sources_md = ""
     for r in state["search_results"]:
         title = str(r.get('title', 'Untitled'))
         url = str(r.get('url', ''))
         sources_md += f"- [{title}]({url})\n"
-    
+
     prompt = f"""You are a technical report writer. Write a structured research report in Markdown based on the synthesis and sources.
 
 User Query: {state['query']}
@@ -210,8 +222,7 @@ Report structure:
 
 Report:"""
 
-    response = llm.invoke(prompt)
-    report = _safe_content(response)
+    report = _invoke_with_fallback(prompt)
     state["report"] = report
     state["current_step"] = "write"
     state["logs"].append("📝 Generated structured report")
@@ -223,21 +234,18 @@ Report:"""
 
 def build_graph():
     from langgraph.graph import StateGraph, END
-
     workflow = StateGraph(AgentState)
     workflow.add_node("plan", plan_node)
     workflow.add_node("search", search_node)
     workflow.add_node("read", read_node)
     workflow.add_node("synthesize", synthesize_node)
     workflow.add_node("write", write_node)
-
     workflow.set_entry_point("plan")
     workflow.add_edge("plan", "search")
     workflow.add_edge("search", "read")
     workflow.add_edge("read", "synthesize")
     workflow.add_edge("synthesize", "write")
     workflow.add_edge("write", END)
-
     return workflow.compile()
 
 # ---------------------------------------------------------------------------
@@ -256,14 +264,13 @@ def run_agent(query: str) -> AgentState:
         "current_step": "start",
         "logs": ["🚀 Agent started"],
     }
-    # Use invoke() instead of stream() to get final state directly
     final_state = graph.invoke(initial_state)
     return final_state
 
 def main():
     st.set_page_config(page_title="ResearchAgent", page_icon="🔬", layout="wide")
     st.title("🔬 ResearchAgent — Autonomous 5G Research Assistant")
-    st.markdown("Powered by **LangGraph + Gemini 2.0 Flash + Tavily**")
+    st.markdown("Powered by **LangGraph + Gemini 3.6 Flash + Tavily**")
 
     query = st.text_input(
         "Enter your research query:",
@@ -285,7 +292,6 @@ def main():
             st.warning("Please enter a query.")
             return
 
-        # Check secrets
         missing = []
         try:
             _ = st.secrets["GOOGLE_API_KEY"]
@@ -326,7 +332,7 @@ def main():
                 st.info("No report generated.")
 
     st.divider()
-    st.caption("Built with LangGraph | Gemini 2.0 Flash | Tavily | Streamlit")
+    st.caption("Built with LangGraph | Gemini 3.6 Flash | Tavily | Streamlit")
 
 if __name__ == "__main__":
     main()
